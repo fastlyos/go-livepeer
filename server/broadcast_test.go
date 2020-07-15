@@ -107,11 +107,12 @@ func newStubSegmentVerifier(v *stubVerifier) *verification.SegmentVerifier {
 
 type stubOSSession struct {
 	external bool
+	host     string
 	saved    []string
 	err      error
 }
 
-func (s *stubOSSession) SaveData(name string, data []byte) (string, error) {
+func (s *stubOSSession) SaveData(name string, data []byte, meta map[string]string) (string, error) {
 	s.saved = append(s.saved, name)
 	return "saved_" + name, s.err
 }
@@ -124,7 +125,16 @@ func (s *stubOSSession) IsExternal() bool {
 	return s.external
 }
 func (s *stubOSSession) IsOwn(url string) bool {
-	return true
+	return strings.HasPrefix(url, s.host)
+}
+func (s *stubOSSession) ListFiles(ctx context.Context, prefix, delim string) (drivers.PageInfo, error) {
+	return nil, nil
+}
+func (s *stubOSSession) ReadData(ctx context.Context, name string) (*drivers.FileInfoReader, error) {
+	return nil, nil
+}
+func (s *stubOSSession) OS() drivers.OSDriver {
+	return nil
 }
 
 type stubPlaylistManager struct {
@@ -158,7 +168,13 @@ func (pm *stubPlaylistManager) GetOSSession() drivers.OSSession {
 	return pm.os
 }
 
-func (pm *stubPlaylistManager) Cleanup() {}
+func (pm *stubPlaylistManager) Cleanup()     {}
+func (pm *stubPlaylistManager) FlushRecord() {}
+func (pm *stubPlaylistManager) GetRecordOSSession() drivers.OSSession {
+	return nil
+}
+func (pm *stubPlaylistManager) InsertHLSSegmentJSON(profile *ffmpeg.VideoProfile, seqNo uint64, uri string, duration float64) {
+}
 
 type stubSelector struct {
 	sess *BroadcastSession
@@ -490,7 +506,7 @@ func TestTranscodeSegment_UploadFailed_SuspendAndRemove(t *testing.T) {
 	assert := assert.New(t)
 	mid := core.ManifestID("foo")
 	pl := &stubPlaylistManager{manifestID: mid}
-	drivers.S3BUCKET = "livepeer"
+	// drivers.S3BUCKET = "livepeer"
 	mem := &stubOSSession{err: errors.New("some error")}
 	assert.NotNil(mem)
 
@@ -1068,7 +1084,8 @@ func TestVerifier_Verify(t *testing.T) {
 	verifier := verification.NewSegmentVerifier(&verification.Policy{})
 	URIs := []string{}
 	renditionData := [][]byte{}
-	err := verify(verifier, cxn, sess, source, res, URIs, renditionData)
+	os := drivers.NewMemoryDriver(nil).NewSession("")
+	err := verify(verifier, cxn, sess, source, res, URIs, renditionData, os)
 	assert.Nil(err)
 
 	sess.Params.ManifestID = core.ManifestID("streamName")
@@ -1083,7 +1100,7 @@ func TestVerifier_Verify(t *testing.T) {
 	verifier = newStubSegmentVerifier(sv)
 	assert.Equal(0, sv.calls)  // sanity check initial call count
 	assert.Len(bsm.sessMap, 1) // sanity check initial bsm map
-	err = verify(verifier, cxn, sess, source, res, URIs, renditionData)
+	err = verify(verifier, cxn, sess, source, res, URIs, renditionData, os)
 	assert.NotNil(err)
 	assert.Equal(1, sv.calls)
 	assert.Equal(sv.err, err)
@@ -1095,7 +1112,7 @@ func TestVerifier_Verify(t *testing.T) {
 	_, retryable := sv.err.(verification.Retryable)
 	assert.True(retryable)
 	verifier = newStubSegmentVerifier(sv)
-	err = verify(verifier, cxn, sess, source, res, URIs, renditionData)
+	err = verify(verifier, cxn, sess, source, res, URIs, renditionData, os)
 	assert.NotNil(err)
 	assert.Equal(2, sv.calls)
 	assert.Equal(sv.err, err)
@@ -1115,23 +1132,23 @@ func TestVerifier_Verify(t *testing.T) {
 	}
 	mem, ok := drivers.NewMemoryDriver(nil).NewSession("streamName").(*drivers.MemorySession)
 	assert.True(ok)
-	name, err := mem.SaveData("/rendition/seg/1", []byte("attempt1"))
+	name, err := mem.SaveData("/rendition/seg/1", []byte("attempt1"), nil)
 	assert.Nil(err)
 	assert.Equal([]byte("attempt1"), mem.GetData(name))
 	sess.BroadcasterOS = mem
 	verifier = newStubSegmentVerifier(sv)
 	URIs[0] = name
 	renditionData = [][]byte{[]byte("attempt1")}
-	err = verify(verifier, cxn, sess, source, res, URIs, renditionData)
+	err = verify(verifier, cxn, sess, source, res, URIs, renditionData, os)
 	assert.Equal(sv.err, err)
 
 	// Now "insert" 2nd attempt into OS
 	// and ensure 1st attempt is what remains after verification
-	_, err = mem.SaveData("/rendition/seg/1", []byte("attempt2"))
+	_, err = mem.SaveData("/rendition/seg/1", []byte("attempt2"), nil)
 	assert.Nil(err)
 	assert.Equal([]byte("attempt2"), mem.GetData(name))
 	renditionData = [][]byte{[]byte("attempt2")}
-	err = verify(verifier, cxn, sess, source, res, URIs, renditionData)
+	err = verify(verifier, cxn, sess, source, res, URIs, renditionData, os)
 	assert.Nil(err)
 	assert.Equal([]byte("attempt1"), mem.GetData(name))
 }
@@ -1149,8 +1166,9 @@ func TestVerifier_HLSInsertion(t *testing.T) {
 	//   6. Insert seg2 into playlist
 	mid := core.ManifestID("foo")
 	pl := &stubPlaylistManager{manifestID: mid}
-	drivers.S3BUCKET = "livepeer"
-	mem := drivers.NewS3Driver("", drivers.S3BUCKET, "", "").NewSession(string(mid))
+	// drivers.S3BUCKET = "livepeer"
+	S3BUCKET := "livepeer"
+	mem := drivers.NewS3Driver("", S3BUCKET, "", "", false).NewSession(string(mid))
 	assert.NotNil(mem)
 
 	baseURL := "https://livepeer.s3.amazonaws.com"
@@ -1197,8 +1215,8 @@ func TestDownloadSegError_SuspendAndRemove(t *testing.T) {
 	assert := assert.New(t)
 	mid := core.ManifestID("foo")
 	pl := &stubPlaylistManager{manifestID: mid}
-	drivers.S3BUCKET = "livepeer"
-	mem := drivers.NewS3Driver("", drivers.S3BUCKET, "", "").NewSession(string(mid))
+	S3BUCKET := "livepeer"
+	mem := drivers.NewS3Driver("", S3BUCKET, "", "", false).NewSession(string(mid))
 	assert.NotNil(mem)
 
 	baseURL := "https://livepeer.s3.amazonaws.com"
@@ -1250,7 +1268,7 @@ func TestRefreshSession(t *testing.T) {
 	newSess, err := refreshSession(sess)
 	assert.Nil(newSess)
 	assert.Error(err)
-	assert.EqualError(err, "parse \u007f: net/url: invalid control character in URL")
+	assert.Contains(err.Error(), "net/url: invalid control character in URL")
 
 	// trigger getOrchestratorInfo error
 	getOrchestratorInfoRPC = func(ctx context.Context, bcast common.Broadcaster, orchestratorServer *url.URL) (*net.OrchestratorInfo, error) {
@@ -1299,9 +1317,7 @@ func defaultTicketBatch() *pm.TicketBatch {
 		},
 		TicketExpirationParams: &pm.TicketExpirationParams{},
 		Sender:                 pm.RandAddress(),
-		SenderParams: []*pm.TicketSenderParams{
-			&pm.TicketSenderParams{SenderNonce: 777, Sig: pm.RandBytes(42)},
-		},
+		SenderParams:           []*pm.TicketSenderParams{{SenderNonce: 777, Sig: pm.RandBytes(42)}},
 	}
 }
 
@@ -1310,8 +1326,10 @@ func TestVerifier_SegDownload(t *testing.T) {
 
 	mid := core.ManifestID("foo")
 
-	drivers.S3BUCKET = "livepeer"
-	externalOS := &stubOSSession{}
+	externalOS := &stubOSSession{
+		external: true,
+		host:     "https://livepeer.s3.amazonaws.com",
+	}
 	bsm := bsmWithSessList([]*BroadcastSession{})
 	cxn := &rtmpConnection{
 		mid:         mid,
@@ -1388,8 +1406,8 @@ func TestProcessSegment_VideoFormat(t *testing.T) {
 	// Test format from saving "transcoder" data into broadcaster/transcoder OS.
 	// For each rendition, check extension based on format (none, mp4, mpegts).
 	assert := assert.New(t)
-	bcastOS := &stubOSSession{}
-	orchOS := &stubOSSession{}
+	bcastOS := &stubOSSession{host: "test://broad.com"}
+	orchOS := &stubOSSession{host: "test://orch.com"}
 	sess := genBcastSess(t, "", bcastOS, "")
 	sess.OrchestratorOS = orchOS
 	sess.Params.Profiles = append([]ffmpeg.VideoProfile{}, sess.Params.Profiles...)
@@ -1418,13 +1436,13 @@ func TestProcessSegment_VideoFormat(t *testing.T) {
 	assert.Equal("saved_P240p30fps16x9/0.ts", seg.Name)
 
 	// Check MP4. Reset OS for simplicity
-	bcastOS = &stubOSSession{}
-	orchOS = &stubOSSession{}
+	bcastOS = &stubOSSession{host: "test://broad.com"}
+	orchOS = &stubOSSession{host: "test://orch.com"}
 	sess.BroadcasterOS = bcastOS
 	sess.OrchestratorOS = orchOS
 	cxn.pl = &stubPlaylistManager{os: bcastOS}
 	cxn.profile.Format = ffmpeg.FormatMP4
-	for i, _ := range sess.Params.Profiles {
+	for i := range sess.Params.Profiles {
 		sess.Params.Profiles[i].Format = ffmpeg.FormatMP4
 	}
 	cxn.sessManager = bsmWithSessList([]*BroadcastSession{sess})
@@ -1441,13 +1459,13 @@ func TestProcessSegment_VideoFormat(t *testing.T) {
 	assert.Equal("saved_P240p30fps16x9/0.mp4", seg.Name)
 
 	// Check mpegts. Reset OS for simplicity
-	bcastOS = &stubOSSession{}
-	orchOS = &stubOSSession{}
+	bcastOS = &stubOSSession{host: "test://broad.com"}
+	orchOS = &stubOSSession{host: "test://orch.com"}
 	sess.BroadcasterOS = bcastOS
 	sess.OrchestratorOS = orchOS
 	cxn.pl = &stubPlaylistManager{os: bcastOS}
 	cxn.profile.Format = ffmpeg.FormatMPEGTS
-	for i, _ := range sess.Params.Profiles {
+	for i := range sess.Params.Profiles {
 		sess.Params.Profiles[i].Format = ffmpeg.FormatMPEGTS
 	}
 	cxn.sessManager = bsmWithSessList([]*BroadcastSession{sess})
@@ -1508,7 +1526,7 @@ func genBcastSess(t *testing.T, url string, os drivers.OSSession, mid core.Manif
 	}()
 	return &BroadcastSession{
 		Broadcaster:      stubBroadcaster2(),
-		Params:           &core.StreamParameters{ManifestID: mid, Profiles: []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}},
+		Params:           &core.StreamParameters{ManifestID: mid, Profiles: []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}, OS: os},
 		BroadcasterOS:    os,
 		OrchestratorInfo: &net.OrchestratorInfo{Transcoder: ts.URL},
 	}
