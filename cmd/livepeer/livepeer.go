@@ -85,7 +85,9 @@ var defaultCapabilities = []core.Capability{
 
 // Add to this list as certain features become mandatory. Orchestrator only
 // Use sparingly, as adding to this is a hard break with older nodes
-var mandatoryCapabilities = []core.Capability{}
+var mandatoryCapabilities = []core.Capability{
+	core.Capability_AuthToken,
+}
 
 func main() {
 	// Override the default flag set since there are dependencies that
