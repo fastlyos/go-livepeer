@@ -293,6 +293,21 @@ func verifySegCreds(orch Orchestrator, segCreds string, broadcaster ethcommon.Ad
 		return nil, errCapCompat
 	}
 
+	// Check that auth token is valid and not expired
+	if segData.AuthToken == nil {
+		return nil, errors.New("missing auth token")
+	}
+
+	verifyToken := orch.AuthToken(segData.AuthToken.SessionId, segData.AuthToken.Expiration)
+	if !bytes.Equal(verifyToken.Token, segData.AuthToken.Token) {
+		return nil, errors.New("invalid auth token")
+	}
+
+	expiration := time.Unix(segData.AuthToken.Expiration, 0)
+	if time.Now().After(expiration) {
+		return nil, errors.New("expired auth token")
+	}
+
 	if err := orch.CheckCapacity(md.ManifestID); err != nil {
 		glog.Error("Cannot process manifest: ", err)
 		return nil, err
@@ -519,6 +534,7 @@ func genSegCreds(sess *BroadcastSession, seg *stream.HLSSegment) (string, error)
 		OS:         storage,
 		Duration:   time.Duration(seg.Duration * float64(time.Second)),
 		Caps:       params.Capabilities,
+		AuthToken:  sess.OrchestratorInfo.GetAuthToken(),
 	}
 	sig, err := sess.Broadcaster.Sign(md.Flatten())
 	if err != nil {

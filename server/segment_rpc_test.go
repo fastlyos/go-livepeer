@@ -30,6 +30,8 @@ import (
 	"golang.org/x/net/http2"
 )
 
+var stubAuthToken = &net.AuthToken{Token: []byte("foo"), SessionId: "bar", Expiration: time.Now().Add(1 * time.Hour).Unix()}
+
 func serveSegmentHandler(orch Orchestrator) http.Handler {
 	lp := lphttp{
 		orchestrator: orch,
@@ -81,6 +83,7 @@ func TestServeSegment_MismatchHashError(t *testing.T) {
 	handler := serveSegmentHandler(orch)
 
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -88,6 +91,7 @@ func TestServeSegment_MismatchHashError(t *testing.T) {
 			ManifestID: core.RandomManifestID(),
 			Profiles:   []ffmpeg.VideoProfile{ffmpeg.P720p30fps16x9},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	creds, err := genSegCreds(s, &stream.HLSSegment{})
 	require.Nil(t, err)
@@ -100,7 +104,6 @@ func TestServeSegment_MismatchHashError(t *testing.T) {
 	orch.On("TicketParams", mock.Anything, mock.Anything).Return(&net.TicketParams{}, nil)
 	orch.On("ProcessPayment", net.Payment{}, s.Params.ManifestID).Return(nil)
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
-	orch.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 	headers := map[string]string{
 		paymentHeader: "",
 		segmentHeader: creds,
@@ -123,6 +126,7 @@ func TestServeSegment_TranscodeSegError(t *testing.T) {
 	require := require.New(t)
 
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -130,6 +134,7 @@ func TestServeSegment_TranscodeSegError(t *testing.T) {
 			ManifestID: core.RandomManifestID(),
 			Profiles:   []ffmpeg.VideoProfile{ffmpeg.P720p30fps16x9},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -148,7 +153,6 @@ func TestServeSegment_TranscodeSegError(t *testing.T) {
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
 	orch.On("TranscodeSeg", md, seg).Return(nil, errors.New("TranscodeSeg error"))
 	orch.On("DebitFees", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
-	orch.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
 	headers := map[string]string{
 		paymentHeader: "",
@@ -181,28 +185,35 @@ func TestVerifySegCreds_Duration(t *testing.T) {
 		creds := base64.StdEncoding.EncodeToString(data)
 		md, err := verifySegCreds(orch, creds, ethcommon.Address{})
 		md2, err2 := coreSegMetadata(sd)
+		if md != nil && md2 != nil {
+			// Do protobuf msg checks and then remove them from md & md2
+			// because assert.Equal cannot handle protobuf msgs
+			assert.True(proto.Equal(md.AuthToken, md2.AuthToken))
+			md.AuthToken = nil
+			md2.AuthToken = nil
+		}
 		assert.Equal(md, md2, "Did verifySegCreds call coreSegMetadata?")
 		assert.Equal(err, err2)
 		return md, err
 	}
 
 	// check default value
-	md, err := runVerify(&net.SegData{})
+	md, err := runVerify(&net.SegData{AuthToken: stubAuthToken})
 	assert.Nil(err)
 	assert.Equal(2000*time.Millisecond, md.Duration)
 
 	// check regular value
-	md, err = runVerify(&net.SegData{Duration: int32(123)})
+	md, err = runVerify(&net.SegData{Duration: int32(123), AuthToken: stubAuthToken})
 	assert.Nil(err)
 	assert.Equal(123*time.Millisecond, md.Duration)
 
 	// check invalid value : less than zero
-	md, err = runVerify(&net.SegData{Duration: -1})
+	md, err = runVerify(&net.SegData{Duration: -1, AuthToken: stubAuthToken})
 	assert.Equal(errDuration, err)
 	assert.Nil(md)
 
 	// check invalid value : greater than max duration
-	md, err = runVerify(&net.SegData{Duration: int32(maxDuration.Milliseconds() + 1)})
+	md, err = runVerify(&net.SegData{Duration: int32(maxDuration.Milliseconds() + 1), AuthToken: stubAuthToken})
 	assert.Equal(errDuration, err)
 	assert.Nil(md)
 }
@@ -542,9 +553,10 @@ func TestServeSegment_SaveDataFormat(t *testing.T) {
 	defer func() { drivers.NodeStorage = oldStorage }()
 
 	sess := &BroadcastSession{
-		Params:        &core.StreamParameters{Profiles: []ffmpeg.VideoProfile{ffmpeg.P720p30fps16x9, ffmpeg.P720p60fps16x9}},
-		Broadcaster:   stubBroadcaster2(),
-		BroadcasterOS: os,
+		Params:           &core.StreamParameters{Profiles: []ffmpeg.VideoProfile{ffmpeg.P720p30fps16x9, ffmpeg.P720p60fps16x9}},
+		Broadcaster:      stubBroadcaster2(),
+		BroadcasterOS:    os,
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	creds, err := genSegCreds(sess, &stream.HLSSegment{})
 	assert.Nil(err)
@@ -619,6 +631,7 @@ func TestServeSegment_OSSaveDataError(t *testing.T) {
 	require := require.New(t)
 
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -628,6 +641,7 @@ func TestServeSegment_OSSaveDataError(t *testing.T) {
 				ffmpeg.P720p60fps16x9,
 			},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -644,7 +658,6 @@ func TestServeSegment_OSSaveDataError(t *testing.T) {
 	orch.On("TicketParams", mock.Anything, mock.Anything).Return(&net.TicketParams{}, nil)
 	orch.On("ProcessPayment", net.Payment{}, s.Params.ManifestID).Return(nil)
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
-	orch.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
 	mos := &mockOSSession{}
 
@@ -689,6 +702,7 @@ func TestServeSegment_ReturnSingleTranscodedSegmentData(t *testing.T) {
 	require := require.New(t)
 
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -698,6 +712,7 @@ func TestServeSegment_ReturnSingleTranscodedSegmentData(t *testing.T) {
 				ffmpeg.P720p60fps16x9,
 			},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -714,7 +729,6 @@ func TestServeSegment_ReturnSingleTranscodedSegmentData(t *testing.T) {
 	orch.On("TicketParams", mock.Anything, mock.Anything).Return(&net.TicketParams{}, nil)
 	orch.On("ProcessPayment", net.Payment{}, s.Params.ManifestID).Return(nil)
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
-	orch.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
 	tData := &core.TranscodeData{Segments: []*core.TranscodedSegmentData{&core.TranscodedSegmentData{Data: []byte("foo")}}}
 	tRes := &core.TranscodeResult{
@@ -755,6 +769,7 @@ func TestServeSegment_ReturnMultipleTranscodedSegmentData(t *testing.T) {
 	require := require.New(t)
 
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -765,6 +780,7 @@ func TestServeSegment_ReturnMultipleTranscodedSegmentData(t *testing.T) {
 				ffmpeg.P240p30fps16x9,
 			},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -781,7 +797,6 @@ func TestServeSegment_ReturnMultipleTranscodedSegmentData(t *testing.T) {
 	orch.On("TicketParams", mock.Anything, mock.Anything).Return(&net.TicketParams{}, nil)
 	orch.On("ProcessPayment", net.Payment{}, s.Params.ManifestID).Return(nil)
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
-	orch.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
 	tData := &core.TranscodedSegmentData{Data: []byte("foo")}
 	tRes := &core.TranscodeResult{
@@ -822,6 +837,7 @@ func TestServeSegment_ProcessPaymentError(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -831,6 +847,7 @@ func TestServeSegment_ProcessPaymentError(t *testing.T) {
 				ffmpeg.P720p60fps16x9,
 			},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -873,7 +890,17 @@ func TestServeSegment_UpdateOrchestratorInfo(t *testing.T) {
 
 	require := require.New(t)
 
+	origRandomIDGenerator := common.RandomIDGenerator
+	defer func() { common.RandomIDGenerator = origRandomIDGenerator }()
+
+	authToken := &net.AuthToken{Token: []byte("foo"), SessionId: "bar", Expiration: time.Now().Add(authTokenValidPeriod).Unix()}
+	common.RandomIDGenerator = func(length uint) string { return authToken.SessionId }
+
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	// This could be flaky if time.Now() changes between the time when we set authToken.Expiration and the time
+	// when the mocked AuthToken is called. 1 second would need to elapse which should only really happen if the test
+	// is run in a really slow environment
+	orch.On("AuthToken", authToken.SessionId, authToken.Expiration).Return(authToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -883,6 +910,7 @@ func TestServeSegment_UpdateOrchestratorInfo(t *testing.T) {
 				ffmpeg.P720p60fps16x9,
 			},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: authToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -905,12 +933,6 @@ func TestServeSegment_UpdateOrchestratorInfo(t *testing.T) {
 		PixelsPerUnit: 3,
 	}
 
-	origRandomIDGenerator := common.RandomIDGenerator
-	defer func() { common.RandomIDGenerator = origRandomIDGenerator }()
-
-	authToken := &net.AuthToken{Token: []byte("foo"), SessionId: "bar", Expiration: time.Now().Add(authTokenValidPeriod).Unix()}
-	common.RandomIDGenerator = func(length uint) string { return authToken.SessionId }
-
 	// trigger an update to orchestrator info
 	drivers.NodeStorage = drivers.NewMemoryDriver(nil)
 	uri, err := url.Parse("http://google.com")
@@ -922,10 +944,6 @@ func TestServeSegment_UpdateOrchestratorInfo(t *testing.T) {
 	orch.On("PriceInfo", mock.Anything).Return(price, nil)
 	orch.On("ProcessPayment", net.Payment{}, s.Params.ManifestID).Return(nil).Once()
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
-	// This could be flaky if time.Now() changes between the time when we set authToken.Expiration and the time
-	// when the mocked AuthToken is called. 1 second would need to elapse which should only really happen if the test
-	// is run in a really slow environment
-	orch.On("AuthToken", authToken.SessionId, authToken.Expiration).Return(authToken)
 
 	tData := &core.TranscodeData{Segments: []*core.TranscodedSegmentData{&core.TranscodedSegmentData{Data: []byte("foo")}}}
 	tRes := &core.TranscodeResult{
@@ -988,6 +1006,7 @@ func TestServeSegment_InsufficientBalanceError(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -995,6 +1014,7 @@ func TestServeSegment_InsufficientBalanceError(t *testing.T) {
 			ManifestID: core.RandomManifestID(),
 			Profiles:   []ffmpeg.VideoProfile{ffmpeg.P720p30fps16x9},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -1027,6 +1047,7 @@ func TestServeSegment_DebitFees_SingleRendition(t *testing.T) {
 	require := require.New(t)
 
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -1036,6 +1057,7 @@ func TestServeSegment_DebitFees_SingleRendition(t *testing.T) {
 				ffmpeg.P720p60fps16x9,
 			},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -1052,7 +1074,6 @@ func TestServeSegment_DebitFees_SingleRendition(t *testing.T) {
 	orch.On("TicketParams", mock.Anything, mock.Anything).Return(&net.TicketParams{}, nil)
 	orch.On("ProcessPayment", net.Payment{}, s.Params.ManifestID).Return(nil)
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
-	orch.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
 	tData := &core.TranscodeData{Segments: []*core.TranscodedSegmentData{&core.TranscodedSegmentData{Data: []byte("foo"), Pixels: int64(110592000)}}}
 	tRes := &core.TranscodeResult{
@@ -1095,6 +1116,7 @@ func TestServeSegment_DebitFees_MultipleRenditions(t *testing.T) {
 	require := require.New(t)
 
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -1105,6 +1127,7 @@ func TestServeSegment_DebitFees_MultipleRenditions(t *testing.T) {
 				ffmpeg.P240p30fps16x9,
 			},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -1120,7 +1143,6 @@ func TestServeSegment_DebitFees_MultipleRenditions(t *testing.T) {
 	orch.On("TicketParams", mock.Anything, mock.Anything).Return(&net.TicketParams{}, nil)
 	orch.On("ProcessPayment", net.Payment{}, s.Params.ManifestID).Return(nil)
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
-	orch.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
 	tData720 := &core.TranscodedSegmentData{
 		Data:   []byte("foo"),
@@ -1173,6 +1195,7 @@ func TestServeSegment_DebitFees_OSSaveDataError_BreakLoop(t *testing.T) {
 	require := require.New(t)
 
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -1183,6 +1206,7 @@ func TestServeSegment_DebitFees_OSSaveDataError_BreakLoop(t *testing.T) {
 				ffmpeg.P240p30fps16x9,
 			},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -1198,7 +1222,6 @@ func TestServeSegment_DebitFees_OSSaveDataError_BreakLoop(t *testing.T) {
 	orch.On("TicketParams", mock.Anything, mock.Anything).Return(&net.TicketParams{}, nil)
 	orch.On("ProcessPayment", net.Payment{}, s.Params.ManifestID).Return(nil)
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
-	orch.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
 	mos := &mockOSSession{}
 
@@ -1254,6 +1277,7 @@ func TestServeSegment_DebitFees_TranscodeSegError_ZeroPixelsBilled(t *testing.T)
 	require := require.New(t)
 
 	orch.On("VerifySig", mock.Anything, mock.Anything, mock.Anything).Return(true)
+	orch.On("AuthToken", mock.Anything, mock.Anything).Return(stubAuthToken)
 
 	s := &BroadcastSession{
 		Broadcaster: stubBroadcaster2(),
@@ -1263,6 +1287,7 @@ func TestServeSegment_DebitFees_TranscodeSegError_ZeroPixelsBilled(t *testing.T)
 				ffmpeg.P720p60fps16x9,
 			},
 		},
+		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
 	seg := &stream.HLSSegment{Data: []byte("foo")}
 	creds, err := genSegCreds(s, seg)
@@ -1280,7 +1305,6 @@ func TestServeSegment_DebitFees_TranscodeSegError_ZeroPixelsBilled(t *testing.T)
 	orch.On("SufficientBalance", mock.Anything, s.Params.ManifestID).Return(true)
 	orch.On("TranscodeSeg", md, seg).Return(nil, errors.New("TranscodeSeg error"))
 	orch.On("DebitFees", mock.Anything, md.ManifestID, mock.Anything, int64(0))
-	orch.On("AuthToken", mock.Anything, mock.Anything).Return(&net.AuthToken{})
 
 	headers := map[string]string{
 		paymentHeader: "",
