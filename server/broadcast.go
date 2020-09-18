@@ -252,8 +252,7 @@ func selectOrchestrator(n *core.LivepeerNode, params *core.StreamParameters, cou
 		bcastOS := params.OS
 		if bcastOS.IsExternal() {
 			// Give each O its own OS session to prevent front running uploads
-			pfx := fmt.Sprintf("%v/%v", params.ManifestID, core.RandomManifestID())
-			bcastOS = drivers.NodeStorage.NewSession(pfx)
+			bcastOS = drivers.NodeStorage.NewSession(tinfo.AuthToken.SessionId)
 		}
 
 		session := &BroadcastSession{
