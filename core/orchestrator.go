@@ -531,7 +531,7 @@ func (n *LivepeerNode) transcodeSeg(config transcodeConfig, seg *stream.HLSSegme
 	took := time.Since(start)
 	glog.V(common.DEBUG).Infof("Transcoding of segment manifestID=%s seqNo=%d took=%v", string(md.ManifestID), seg.SeqNo, took)
 	if !isRemote && monitor.Enabled {
-		monitor.SegmentTranscoded(0, seg.SeqNo, took, common.ProfilesNames(md.Profiles))
+		monitor.SegmentTranscoded(0, seg.SeqNo, seg.Duration, took, common.ProfilesNames(md.Profiles))
 	}
 
 	// Prepare the result object
